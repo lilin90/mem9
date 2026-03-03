@@ -31,7 +31,7 @@ Mnemo supports two modes (auto-detected):
 
 ```bash
 # Source the helpers
-source /Users/qifangfang/go/src/github.com/qiffang/mnemos/ccplugin/hooks/common.sh
+source "$(find ~ -path '*/mnemos/claude-plugin/hooks/common.sh' -print -quit 2>/dev/null || echo /dev/null)"
 
 # Store the memory
 mnemo_post_memory '{"content":"THE MEMORY CONTENT HERE","tags":["tag1","tag2"],"source":"claude-code","key":"optional-unique-key"}'
