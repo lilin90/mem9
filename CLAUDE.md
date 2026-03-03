@@ -9,7 +9,7 @@ mnemos is cloud-persistent memory for AI agents. Two modes, one plugin:
 Three components:
 - `server/` — Go REST API (chi router, TiDB/MySQL, optional embedding)
 - `openclaw-plugin/` — Agent plugin for OpenClaw (direct + server backends)
-- `ccplugin/` — Claude Code plugin (bash hooks + skills, mode-aware)
+- `claude-plugin/` — Claude Code plugin (bash hooks + skills, mode-aware)
 
 ## Commands
 
@@ -48,11 +48,12 @@ openclaw-plugin/embedder.ts         — OpenAI-compatible embedding provider
 openclaw-plugin/schema.ts           — Auto schema init with VECTOR column
 openclaw-plugin/types.ts            — Shared TypeScript types
 
-ccplugin/hooks/common.sh            — Mode detection + helpers (direct: TiDB HTTP API, server: REST)
-ccplugin/hooks/session-start.sh     — Load recent memories → additionalContext
-ccplugin/hooks/stop.sh              — Summarize with Haiku → save memory
-ccplugin/hooks/user-prompt-submit.sh — System hint about available memory
-ccplugin/skills/memory-recall/      — Forked skill for on-demand search
+claude-plugin/hooks/common.sh            — Mode detection + helpers (direct: TiDB HTTP API, server: REST)
+claude-plugin/hooks/session-start.sh     — Load recent memories → additionalContext
+claude-plugin/hooks/stop.sh              — Save last response as memory
+claude-plugin/hooks/user-prompt-submit.sh — System hint about available memory
+claude-plugin/skills/memory-recall/      — On-demand search skill
+claude-plugin/skills/memory-store/       — On-demand save skill
 ```
 
 ## Code style
@@ -115,3 +116,47 @@ Put the returned `api_token` into the plugin config as `userToken`:
 On first tool call, the plugin automatically calls `POST /api/spaces/provision` (authenticated
 with `userToken`) to obtain a workspace-scoped `spaceToken`, which is then used for all memory
 operations. The `userToken` is never sent to memory endpoints directly.
+
+## Installing the Claude Code plugin
+
+If a user asks to install or set up the claude-plugin, read `claude-plugin/README.md` for the full guide.
+
+**Marketplace install (recommended):**
+
+1. In Claude Code: `/plugin marketplace add qiffang/mnemos`
+2. Then: `/plugin install mnemo-memory@mnemos`
+3. Accept the hook permissions when prompted
+4. Add database credentials to `~/.claude/settings.json` under `env`:
+   - **Direct mode** (default): set `MNEMO_DB_HOST`, `MNEMO_DB_USER`, `MNEMO_DB_PASS`, `MNEMO_DB_NAME`
+   - **Server mode**: set `MNEMO_API_URL` and `MNEMO_API_TOKEN`
+5. Restart Claude Code
+
+**Manual install (alternative):**
+
+1. `chmod +x claude-plugin/hooks/*.sh`
+2. Copy skills: `cp -r claude-plugin/skills/memory-{recall,store} ~/.claude/skills/`
+3. Add `env` + `hooks` entries to `~/.claude/settings.json` (see `claude-plugin/README.md` for full config)
+4. Direct mode only: hooks auto-create the `mnemos.memories` table on first run
+
+## Installing the OpenCode plugin
+
+If a user asks to install mnemo for OpenCode, read `opencode-plugin/README.md` for the full guide. Quick summary:
+
+1. `cd opencode-plugin && npm install`
+2. Add to `opencode.json`: `{"plugins": {"mnemo": {"path": "/absolute/path/to/mnemos/opencode-plugin"}}}`
+3. Set env vars:
+   - **Direct mode** (default): `MNEMO_DB_HOST`, `MNEMO_DB_USER`, `MNEMO_DB_PASS`
+   - **Server mode**: `MNEMO_API_URL` and `MNEMO_API_TOKEN`
+4. Plugin auto-detects mode and logs `[mnemo] Direct mode...` or `[mnemo] Server mode...` on startup
+
+## Installing the OpenClaw plugin
+
+If a user asks to install mnemo for OpenClaw, read `openclaw-plugin/README.md` for the full guide. Quick summary:
+
+1. `cd openclaw-plugin && npm install`
+2. Add to `openclaw.json`:
+   - Set `plugins.slots.memory` to `"mnemo"`
+   - Add `plugins.entries.mnemo` with `enabled: true` and config
+   - **Direct mode** (default): set `host`, `username`, `password` in config
+   - **Server mode**: set `apiUrl`, `apiToken` in config
+3. Plugin is `kind: "memory"` — OpenClaw framework manages the lifecycle automatically

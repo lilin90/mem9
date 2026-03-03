@@ -45,16 +45,18 @@ This architecture means your agent plugins are **truly stateless** — all state
 
 ## Supported Agents
 
-mnemos provides native plugins for major AI coding agent platforms. OpenClaw is one supported platform, not a requirement:
+mnemos provides native plugins for major AI coding agent platforms:
 
-| Platform | Plugin Type | How It Works |
-|---|---|---|
-| **Claude Code** | Hooks + Skills | Auto-loads memories on session start, auto-saves on stop via Haiku summarization |
-| **OpenCode** | Plugin SDK | `system.transform` injects memories, `session.idle` event auto-captures |
-| **OpenClaw** | Agent Memory Plugin | Replaces built-in memory slot (`kind: "memory"`), framework manages lifecycle |
-| **Any HTTP client** | REST API / SQL | `curl` to mnemo-server or TiDB HTTP Data API directly |
+| Platform | Plugin | How It Works | Install Guide |
+|---|---|---|---|
+| **Claude Code** | Hooks + Skills | Auto-loads memories on session start, auto-saves on stop | [`claude-plugin/README.md`](claude-plugin/README.md) — or run `/plugin marketplace add qiffang/mnemos` |
+| **OpenCode** | Plugin SDK | `system.transform` injects memories, `session.idle` auto-captures | [`opencode-plugin/README.md`](opencode-plugin/README.md) |
+| **OpenClaw** | Memory Plugin | Replaces built-in memory slot (`kind: "memory"`), framework manages lifecycle | [`openclaw-plugin/README.md`](openclaw-plugin/README.md) |
+| **Any HTTP client** | REST API / SQL | `curl` to mnemo-server or TiDB HTTP Data API directly | [API Reference](#api-reference-server-mode) |
 
 All plugins expose the same 5 tools: `memory_store`, `memory_search`, `memory_get`, `memory_update`, `memory_delete`.
+
+> **Agent**: To help a user install mnemos, identify which platform they use, then follow the corresponding Install Guide link above. Each guide covers both Direct mode and Server mode.
 
 ## Two Modes, One Plugin
 
@@ -99,58 +101,63 @@ The same plugin works in two modes — just change the config:
 
 ## Quick Start — Direct Mode (30 seconds)
 
-1. Create a free [TiDB Cloud Serverless](https://tidbcloud.com) cluster
-2. Set environment variables:
+For individual developers. Connect your agent directly to TiDB Cloud — no server to deploy.
 
-**Claude Code / OpenCode:**
+1. Create a free [TiDB Cloud Serverless](https://tidbcloud.com) cluster
+2. Install the plugin for your agent platform (pick one):
+
+| Platform | Install command |
+|---|---|
+| Claude Code | **Marketplace**: `/plugin marketplace add qiffang/mnemos` then `/plugin install mnemo-memory@mnemos` <br/> **Manual**: See [`claude-plugin/README.md`](claude-plugin/README.md) |
+| OpenCode | `cd opencode-plugin && npm install` → add to `opencode.json` → set env vars |
+| OpenClaw | `cd openclaw-plugin && npm install` → add to `openclaw.json` |
+3. Set your database credentials (Claude Code / OpenCode use env vars, OpenClaw uses `openclaw.json` config):
+
 ```bash
+# Claude Code / OpenCode — env vars
 export MNEMO_DB_HOST="gateway01.us-east-1.prod.aws.tidbcloud.com"
 export MNEMO_DB_USER="xxx.root"
 export MNEMO_DB_PASS="xxx"
 export MNEMO_DB_NAME="mnemos"
-
-# Optional: enable hybrid vector search
-export MNEMO_EMBED_API_KEY="sk-..."
-```
-
-**OpenClaw:**
-```json
-{
-  "plugins": {
-    "slots": { "memory": "mnemo" },
-    "entries": {
-      "mnemo": {
-        "enabled": true,
-        "config": {
-          "host": "gateway01.us-east-1.prod.aws.tidbcloud.com",
-          "username": "xxx.root",
-          "password": "xxx",
-          "database": "mnemos"
-        }
-      }
-    }
-  }
-}
 ```
 
 That's it. The plugin auto-creates the table, loads past memories on session start, and saves new ones on session end. **Zero deployment, zero ops.**
 
+Each plugin's README has the complete step-by-step guide with verification steps.
+
 ## Quick Start — Server Mode (Team Setup)
+
+For teams with multiple agents that need to share memory. Deploy a mnemo-server that manages spaces, tokens, and (soon) LLM conflict merge.
+
+**Why server mode?**
+- **Space isolation** — each team/project gets its own memory pool
+- **Per-agent tokens** — every agent instance gets a scoped API token
+- **Centralized control** — rate limiting, auth, and audit in one place
+- **LLM conflict merge (Phase 2)** — smart resolution when two agents update the same memory
 
 ```bash
 # 1. Deploy server
 cd server && MNEMO_DSN="user:pass@tcp(host:4000)/mnemos?parseTime=true" go run ./cmd/mnemo-server
 
-# 2. Create a shared space
+# 2. Create a shared space (no auth required for bootstrap)
 curl -s -X POST localhost:8080/api/spaces \
   -H "Content-Type: application/json" \
   -d '{"name":"backend-team","agent_name":"alice-claude","agent_type":"claude_code"}'
 # → {"ok":true, "space_id":"...", "api_token":"mnemo_abc"}
 
-# 3. Configure any agent to use the space
+# 3. Add more agents to the same space
+curl -s -X POST localhost:8080/api/spaces/<space_id>/tokens \
+  -H "Authorization: Bearer mnemo_abc" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_name":"bob-opencode","agent_type":"opencode"}'
+# → {"ok":true, "api_token":"mnemo_def"}
+
+# 4. Configure any agent to use its token
 export MNEMO_API_URL="http://localhost:8080"
 export MNEMO_API_TOKEN="mnemo_abc"
 ```
+
+Each agent uses its own token. All agents in the same space share one memory pool.
 
 ## Stateless Agents, Cloud Memory
 
@@ -268,9 +275,9 @@ mnemos/
 │   ├── server-backend.ts       # Server: fetch → mnemo API
 │   └── embedder.ts             # Embedding provider abstraction
 │
-├── ccplugin/                   # Claude Code plugin (Hooks + Skills)
+├── claude-plugin/              # Claude Code plugin (Hooks + Skills)
 │   ├── hooks/                  # Lifecycle hooks (bash + curl)
-│   └── skills/memory-recall/   # On-demand search skill
+│   └── skills/                 # memory-recall + memory-store skills
 │
 └── docs/DESIGN.md              # Full design document
 ```

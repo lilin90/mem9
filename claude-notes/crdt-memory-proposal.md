@@ -34,7 +34,7 @@ In scope:
 - Tombstone (soft) deletion replacing hard delete
 - Bootstrap endpoint (`GET /api/memories/bootstrap`)
 - Update OpenClaw plugin API client to send/receive clocks
-- Update ccplugin hooks to pass agent identity
+- Update claude-plugin hooks to pass agent identity
 
 Out of scope:
 - Client-side vector clock state persistence (can be added later; the server is authoritative)
@@ -134,7 +134,7 @@ GET /api/memories/bootstrap?limit=20
 
 Returns the top-N memories for a space, ordered by recency (`updated_at DESC`), filtered by `tombstone = FALSE`. No new selection intelligence yet -- pure recency. The `limit` parameter defaults to 20, max 100.
 
-This is a thin convenience endpoint. The ccplugin `session-start.sh` already does `GET /api/memories?limit=20` -- the bootstrap endpoint formalizes this with a stable contract for future selection strategies (relevance scoring, pinned memories, etc).
+This is a thin convenience endpoint. The claude-plugin `session-start.sh` already does `GET /api/memories?limit=20` -- the bootstrap endpoint formalizes this with a stable contract for future selection strategies (relevance scoring, pinned memories, etc).
 
 ### Endpoint Behavior Matrix
 
@@ -284,7 +284,7 @@ X-Mnemo-Dominated: true           (present and "true" when the incoming write wa
 
 This is backward-compatible: existing clients that call `POST /api/memories` and decode the body as `Memory` continue to work unchanged. New clients that want merge metadata read the headers.
 
-> **Why headers, not body?** Wrapping in `{"memory": {...}, "merged": true}` breaks every existing client that decodes the body as `Memory` — including `MnemoClient.store()` in the OpenClaw plugin and the ccplugin curl calls. Headers add metadata without touching the body schema.
+> **Why headers, not body?** Wrapping in `{"memory": {...}, "merged": true}` breaks every existing client that decodes the body as `Memory` — including `MnemoClient.store()` in the OpenClaw plugin and the claude-plugin curl calls. Headers add metadata without touching the body schema.
 
 **`origin_agent` vs `source` vs `updated_by`:**
 - `source`: the agent name extracted from the Bearer token. Set by the server on every write. Reflects who authenticated.
@@ -412,7 +412,7 @@ The plugin now has a dual-mode architecture: `DirectBackend` (raw SQL to TiDB Se
 
 The plugin does NOT maintain a local clock in this phase. The server handles all clock logic. Clock-less writes (`clock` omitted) take the LWW fast path on the server.
 
-### ccplugin (`ccplugin/`)
+### claude-plugin (`claude-plugin/`)
 
 `stop.sh` -- no change needed. It already posts memories without a clock, which will work with the backward-compatible server.
 
@@ -453,7 +453,7 @@ Phase order chosen to minimize risk — each phase is independently deployable a
 - Add `ListBootstrap` to repository
 - Add `Bootstrap` method to service
 - Register `GET /api/memories/bootstrap` route
-- Update ccplugin `session-start.sh` to use bootstrap endpoint (optional)
+- Update claude-plugin `session-start.sh` to use bootstrap endpoint (optional)
 - **Dependencies:** Phase A. Gate: deploy after Phase C is validated in production.
 
 ### Phase E: Plugin Updates (~50 LoC TypeScript)

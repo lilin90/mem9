@@ -29,7 +29,7 @@ Mnemo supports two modes (auto-detected):
 
 ```bash
 # Source the helpers
-SCRIPT_DIR="$(cd "$(dirname "$(find . -path '*/ccplugin/hooks/common.sh' -print -quit 2>/dev/null || echo /dev/null)")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(find . -path '*/claude-plugin/hooks/common.sh' -print -quit 2>/dev/null || echo /dev/null)")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/common.sh" ]]; then
   source "${SCRIPT_DIR}/common.sh"
 fi

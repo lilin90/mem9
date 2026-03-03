@@ -25,14 +25,14 @@ go run ./cmd/mnemo-server
 
 ### Claude Code Plugin
 
-The ccplugin is pure bash + curl with zero dependencies. To test locally:
+The claude-plugin is pure bash + curl with zero dependencies. To test locally:
 
 ```bash
 export MNEMO_API_URL="http://localhost:8080"
 export MNEMO_API_TOKEN="mnemo_xxx"
 
 # Test a hook script directly
-echo '{}' | ./ccplugin/hooks/session-start.sh
+echo '{}' | ./claude-plugin/hooks/session-start.sh
 ```
 
 ### Agent Plugins (OpenClaw)
@@ -54,7 +54,7 @@ This section is for the OpenClaw integration specifically; mnemos supports multi
 ## Code Style
 
 - **Go**: `gofmt` is the standard. No additional linters required.
-- **Shell**: Follow the patterns in `ccplugin/hooks/common.sh`. Use `set -euo pipefail`.
+- **Shell**: Follow the patterns in `claude-plugin/hooks/common.sh`. Use `set -euo pipefail`.
 - **TypeScript**: Follow existing patterns in agent plugin packages (`openclaw-plugin/`, `opencode-plugin/`).
 
 ## Architecture

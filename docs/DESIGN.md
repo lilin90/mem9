@@ -222,7 +222,7 @@ In Direct mode, `space_id` is set to a fixed value `"default"`. All queries stil
 ```
      Claude Code              OpenClaw              Any Client
   ┌────────────────┐    ┌────────────────┐    ┌────────────────┐
-  │ ccplugin       │    │ openclaw-      │    │ curl / fetch   │
+  │ claude-plugin       │    │ openclaw-      │    │ curl / fetch   │
   │ (Hooks+Skills) │    │ plugin         │    │                │
   │                │    │                │    │                │
   │ bash + curl    │    │ @tidbcloud/    │    │ HTTP POST      │
@@ -246,7 +246,7 @@ In Direct mode, `space_id` is set to a fixed value `"default"`. All queries stil
 ```
      Claude Code              OpenClaw              Any Client
   ┌────────────────┐    ┌────────────────┐    ┌────────────────┐
-  │ ccplugin       │    │ openclaw-      │    │ curl / fetch   │
+  │ claude-plugin       │    │ openclaw-      │    │ curl / fetch   │
   │ (Hooks+Skills) │    │ plugin         │    │                │
   │                │    │                │    │                │
   │ bash + curl    │    │ HTTP client    │    │ HTTP client    │
@@ -663,7 +663,7 @@ mnemos/
 │   ├── openclaw.plugin.json
 │   └── package.json
 │
-├── ccplugin/                   # Claude Code plugin (Hooks + Skills)
+├── claude-plugin/                   # Claude Code plugin (Hooks + Skills)
 │   ├── .claude-plugin/
 │   │   └── plugin.json
 │   ├── hooks/
