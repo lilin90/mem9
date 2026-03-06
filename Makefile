@@ -1,4 +1,4 @@
-.PHONY: build vet clean run check-schema
+.PHONY: build vet clean run test check-schema
 
 build:
 	cd server && go build -o mnemo-server ./cmd/mnemo-server
@@ -6,6 +6,9 @@ build:
 vet:
 	cd server && go vet ./...
 
+
+test:
+	cd server && go test -race -count=1 ./...
 clean:
 	rm -f server/mnemo-server
 

@@ -5,6 +5,8 @@ import type {
   CreateMemoryInput,
   UpdateMemoryInput,
   SearchInput,
+  IngestInput,
+  IngestResult,
 } from "./types.js";
 
 function uuidv4(): string {
@@ -13,6 +15,14 @@ function uuidv4(): string {
     return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
   });
 }
+
+type TenantRegisterResponse = {
+  ok: boolean;
+  tenant_id: string;
+  token: string;
+  claim_url?: string;
+  status: string;
+};
 
 export class ServerBackend implements MemoryBackend {
   private baseUrl: string;
@@ -23,6 +33,34 @@ export class ServerBackend implements MemoryBackend {
     this.baseUrl = apiUrl.replace(/\/+$/, "");
     this.token = apiToken;
     this.agentName = agentName;
+  }
+
+  async register(tenantName?: string): Promise<TenantRegisterResponse> {
+    const name = tenantName ?? `${this.agentName}-tenant`;
+    const resp = await fetch(this.baseUrl + "/api/tenants/register", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name,
+        agent_name: this.agentName,
+        agent_type: "openclaw",
+      }),
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`tenant registration failed (${resp.status}): ${body}`);
+    }
+
+    const data = (await resp.json()) as TenantRegisterResponse;
+    if (!data?.token) {
+      throw new Error("tenant registration did not return a token");
+    }
+
+    this.token = data.token;
+    return data;
   }
 
   async store(input: CreateMemoryInput): Promise<Memory> {
@@ -107,6 +145,10 @@ export class ServerBackend implements MemoryBackend {
     } catch {
       return false;
     }
+  }
+
+  async ingest(input: IngestInput): Promise<IngestResult> {
+    return this.request<IngestResult>("POST", "/api/memories/ingest", input);
   }
 
   private async requestRaw(

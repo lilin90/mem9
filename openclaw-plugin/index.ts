@@ -8,6 +8,8 @@ import type {
   CreateMemoryInput,
   UpdateMemoryInput,
   SearchInput,
+  IngestInput,
+  IngestResult,
 } from "./types.js";
 
 function jsonResult(data: unknown) {
@@ -310,19 +312,32 @@ const mnemoPlugin = {
       api.registerTool(() => tools, {
         names: toolNames,
       });
-      registerHooks(api, backend, api.logger);
+      registerHooks(api, backend, api.logger, { maxIngestBytes: cfg.maxIngestBytes });
       return;
     }
 
     if (cfg.apiUrl) {
-      if (!cfg.userToken) {
-        api.logger.error(
-          "[mnemo] Server mode requires apiUrl and userToken. Plugin disabled."
+      const configuredToken = cfg.apiToken ?? cfg.userToken;
+      const registerTenant = async (agentName: string): Promise<string> => {
+        const tenantName = cfg.tenantName ?? `${agentName}-tenant`;
+        const backend = new ServerBackend(cfg.apiUrl!, "", agentName);
+        const result = await backend.register(tenantName);
+        const claimUrl = result.claim_url ?? "unknown";
+        api.logger.info(
+          `[mnemo] Auto-registered tenant: ${result.tenant_id}, claim your TiDB instance at: ${claimUrl}`
         );
-        return;
-      }
+        return result.token;
+      };
+      let registrationPromise: Promise<string> | null = null;
+      const resolveTenantToken = (agentName: string): Promise<string> => {
+        if (configuredToken) return Promise.resolve(configuredToken);
+        if (!registrationPromise) {
+          registrationPromise = registerTenant(agentName);
+        }
+        return registrationPromise;
+      };
 
-      api.logger.info("[mnemo] Server mode (user token + workspace isolation)");
+      api.logger.info("[mnemo] Server mode (workspace isolation)");
       const spaceTokenCache = new Map<string, string>();
 
       const factory: ToolFactory = (ctx: ToolContext) => {
@@ -338,7 +353,7 @@ const mnemoPlugin = {
         const workspaceKey = hashWorkspaceDir(workspaceDir);
         const backend = new LazyServerBackend(
           cfg.apiUrl!,
-          cfg.userToken!,
+          () => resolveTenantToken(agentId),
           workspaceKey,
           agentId,
           spaceTokenCache,
@@ -353,13 +368,13 @@ const mnemoPlugin = {
       // Uses the default workspace/agent context for hook-triggered operations.
       const hookBackend = new LazyServerBackend(
         cfg.apiUrl!,
-        cfg.userToken!,
+        () => resolveTenantToken(cfg.agentName ?? "agent"),
         hashWorkspaceDir("default"),
         cfg.agentName ?? "agent",
         spaceTokenCache,
         "default::" + (cfg.agentName ?? "agent"),
       );
-      registerHooks(api, hookBackend, api.logger);
+      registerHooks(api, hookBackend, api.logger, { maxIngestBytes: cfg.maxIngestBytes });
       return;
     }
 
@@ -383,7 +398,7 @@ class LazyServerBackend implements MemoryBackend {
 
   constructor(
     private apiUrl: string,
-    private userToken: string,
+    private tokenProvider: () => Promise<string>,
     private workspaceKey: string,
     private agentId: string,
     private cache: Map<string, string>,
@@ -394,16 +409,18 @@ class LazyServerBackend implements MemoryBackend {
     if (this.resolved) return this.resolved;
     if (this.resolving) return this.resolving;
 
-    this.resolving = provisionSpaceToken(
-      this.apiUrl,
-      this.userToken,
-      this.workspaceKey,
-      this.agentId,
-    ).then((spaceToken) => {
-      this.cache.set(this.cacheKey, spaceToken);
-      this.resolved = new ServerBackend(this.apiUrl, spaceToken, this.agentId);
-      return this.resolved;
-    });
+    this.resolving = this.tokenProvider().then((tenantToken) =>
+      provisionSpaceToken(
+        this.apiUrl,
+        tenantToken,
+        this.workspaceKey,
+        this.agentId,
+      ).then((spaceToken) => {
+        this.cache.set(this.cacheKey, spaceToken);
+        this.resolved = new ServerBackend(this.apiUrl, spaceToken, this.agentId);
+        return this.resolved;
+      })
+    );
 
     return this.resolving;
   }
@@ -423,6 +440,8 @@ class LazyServerBackend implements MemoryBackend {
   async remove(id: string) {
     return (await this.resolve()).remove(id);
   }
+  async ingest(input: IngestInput): Promise<IngestResult> {
+    return (await this.resolve()).ingest(input);
+  }
 }
-
 export default mnemoPlugin;
