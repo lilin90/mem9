@@ -70,7 +70,7 @@ Save the `id`. This is your `tenantID`.
 ### Step 2 — Install plugin
 
 ```bash
-npm install mnemo-openclaw
+npm install mem9-openclaw
 ```
 
 ### Step 3 — Configure openclaw.json

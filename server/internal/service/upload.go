@@ -19,6 +19,7 @@ import (
 
 const uploadChunkSize = 50
 const uploadMemoryBatchSize = 100
+const defaultTaskTimeout = 30 * time.Minute
 
 // SessionFile is the expected JSON format for session file uploads.
 type SessionFile struct {
@@ -130,16 +131,21 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	defer w.cleanupFile(task, logger)
 
-	tenantInfo, err := w.tenants.GetByID(ctx, task.TenantID)
+	// Per-task timeout to prevent indefinite blocking
+	taskCtx, cancel := context.WithTimeout(ctx, defaultTaskTimeout)
+	defer cancel()
+
+	tenantInfo, err := w.tenants.GetByID(taskCtx, task.TenantID)
 	if err != nil {
-		return w.failTask(ctx, task.TaskID, fmt.Errorf("resolve tenant: %w", err), logger)
+		w.cleanupFileOnFailure(task, logger)
+		return w.failTask(taskCtx, task.TaskID, fmt.Errorf("resolve tenant: %w", err), logger)
 	}
 
-	db, err := w.pool.Get(ctx, tenantInfo.ID, tenantInfo.DSN())
+	db, err := w.pool.Get(taskCtx, tenantInfo.ID, tenantInfo.DSN())
 	if err != nil {
-		return w.failTask(ctx, task.TaskID, fmt.Errorf("get tenant db: %w", err), logger)
+		w.cleanupFileOnFailure(task, logger)
+		return w.failTask(taskCtx, task.TaskID, fmt.Errorf("get tenant db: %w", err), logger)
 	}
 
 	memRepo := tidb.NewMemoryRepo(db, w.autoModel)
@@ -147,7 +153,8 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 
 	data, err := os.ReadFile(task.FilePath)
 	if err != nil {
-		return w.failTask(ctx, task.TaskID, fmt.Errorf("read upload file: %w", err), logger)
+		w.cleanupFileOnFailure(task, logger)
+		return w.failTask(taskCtx, task.TaskID, fmt.Errorf("read upload file: %w", err), logger)
 	}
 
 	doneChunks := task.DoneChunks
@@ -160,7 +167,8 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 	case domain.FileTypeSession:
 		var file SessionFile
 		if err := json.Unmarshal(data, &file); err != nil {
-			return w.failTask(ctx, task.TaskID, fmt.Errorf("parse session file: %w", err), logger)
+			w.cleanupFileOnFailure(task, logger)
+			return w.failTask(taskCtx, task.TaskID, fmt.Errorf("parse session file: %w", err), logger)
 		}
 		if file.AgentID == "" {
 			file.AgentID = task.AgentID
@@ -170,43 +178,78 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 		}
 
 		chunks := chunkMessages(file.Messages, uploadChunkSize)
-		// Set total_chunks after parsing so progress reporting works correctly.
-		if err := w.tasks.UpdateTotalChunks(ctx, task.TaskID, len(chunks)); err != nil {
-			return w.failTask(ctx, task.TaskID, fmt.Errorf("update total chunks: %w", err), logger)
+		// Handle empty file: mark done immediately
+		if len(chunks) == 0 {
+			if err := w.tasks.UpdateTotalChunks(taskCtx, task.TaskID, 0); err != nil {
+				w.cleanupFileOnFailure(task, logger)
+				return w.failTask(taskCtx, task.TaskID, fmt.Errorf("update total chunks: %w", err), logger)
+			}
+			// Empty file: skip to done
+			break
 		}
-		for _, chunk := range chunks {
-			_, err := ingestSvc.Ingest(ctx, agentName, IngestRequest{
+
+		// Set total_chunks after parsing so progress reporting works correctly.
+		if err := w.tasks.UpdateTotalChunks(taskCtx, task.TaskID, len(chunks)); err != nil {
+			w.cleanupFileOnFailure(task, logger)
+			return w.failTask(taskCtx, task.TaskID, fmt.Errorf("update total chunks: %w", err), logger)
+		}
+
+		// Skip already-processed chunks (crash recovery)
+		for i, chunk := range chunks {
+			if i < doneChunks {
+				continue // Already processed before crash
+			}
+			_, err := ingestSvc.Ingest(taskCtx, agentName, IngestRequest{
 				AgentID:   file.AgentID,
 				SessionID: file.SessionID,
 				Messages:  chunk,
 				Mode:      w.mode,
 			})
 			if err != nil {
-				return w.failTask(ctx, task.TaskID, fmt.Errorf("ingest session chunk: %w", err), logger)
+				w.cleanupFileOnFailure(task, logger)
+				return w.failTask(taskCtx, task.TaskID, fmt.Errorf("ingest session chunk: %w", err), logger)
 			}
 			doneChunks++
-			if err := w.tasks.UpdateProgress(ctx, task.TaskID, doneChunks); err != nil {
-				return w.failTask(ctx, task.TaskID, fmt.Errorf("update progress: %w", err), logger)
+			if err := w.tasks.UpdateProgress(taskCtx, task.TaskID, doneChunks); err != nil {
+				w.cleanupFileOnFailure(task, logger)
+				return w.failTask(taskCtx, task.TaskID, fmt.Errorf("update progress: %w", err), logger)
 			}
 		}
 
 	case domain.FileTypeMemory:
 		var file MemoryFile
 		if err := json.Unmarshal(data, &file); err != nil {
-			return w.failTask(ctx, task.TaskID, fmt.Errorf("parse memory file: %w", err), logger)
+			w.cleanupFileOnFailure(task, logger)
+			return w.failTask(taskCtx, task.TaskID, fmt.Errorf("parse memory file: %w", err), logger)
 		}
 		if file.AgentID == "" {
 			file.AgentID = task.AgentID
 		}
+
+		// Handle empty file: mark done immediately
+		if len(file.Memories) == 0 {
+			if err := w.tasks.UpdateTotalChunks(taskCtx, task.TaskID, 0); err != nil {
+				w.cleanupFileOnFailure(task, logger)
+				return w.failTask(taskCtx, task.TaskID, fmt.Errorf("update total chunks: %w", err), logger)
+			}
+			// Empty file: skip to done
+			break
+		}
+
 		// Set total_chunks after parsing so progress reporting works correctly.
 		totalBatches := (len(file.Memories) + uploadMemoryBatchSize - 1) / uploadMemoryBatchSize
-		if totalBatches == 0 {
-			totalBatches = 1 // At least 1 for empty file
+		if err := w.tasks.UpdateTotalChunks(taskCtx, task.TaskID, totalBatches); err != nil {
+			w.cleanupFileOnFailure(task, logger)
+			return w.failTask(taskCtx, task.TaskID, fmt.Errorf("update total chunks: %w", err), logger)
 		}
-		if err := w.tasks.UpdateTotalChunks(ctx, task.TaskID, totalBatches); err != nil {
-			return w.failTask(ctx, task.TaskID, fmt.Errorf("update total chunks: %w", err), logger)
-		}
+
+		// Skip already-processed batches (crash recovery)
+		batchIdx := 0
 		for i := 0; i < len(file.Memories); i += uploadMemoryBatchSize {
+			if batchIdx < doneChunks {
+				batchIdx++
+				continue // Already processed before crash
+			}
 			end := i + uploadMemoryBatchSize
 			if end > len(file.Memories) {
 				end = len(file.Memories)
@@ -216,7 +259,8 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 			for _, entry := range batch {
 				metadata, err := marshalMetadata(entry.Metadata)
 				if err != nil {
-					return w.failTask(ctx, task.TaskID, fmt.Errorf("marshal memory metadata: %w", err), logger)
+					w.cleanupFileOnFailure(task, logger)
+					return w.failTask(taskCtx, task.TaskID, fmt.Errorf("marshal memory metadata: %w", err), logger)
 				}
 				memType := domain.TypeInsight
 				if entry.MemoryType != "" {
@@ -235,24 +279,33 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 					UpdatedBy:  agentName,
 				})
 			}
-			if err := memRepo.BulkCreate(ctx, memories); err != nil {
-				return w.failTask(ctx, task.TaskID, fmt.Errorf("bulk create memories: %w", err), logger)
+			if err := memRepo.BulkCreate(taskCtx, memories); err != nil {
+				w.cleanupFileOnFailure(task, logger)
+				return w.failTask(taskCtx, task.TaskID, fmt.Errorf("bulk create memories: %w", err), logger)
 			}
+			batchIdx++
 			doneChunks++
-			if err := w.tasks.UpdateProgress(ctx, task.TaskID, doneChunks); err != nil {
-				return w.failTask(ctx, task.TaskID, fmt.Errorf("update progress: %w", err), logger)
+			if err := w.tasks.UpdateProgress(taskCtx, task.TaskID, doneChunks); err != nil {
+				w.cleanupFileOnFailure(task, logger)
+				return w.failTask(taskCtx, task.TaskID, fmt.Errorf("update progress: %w", err), logger)
 			}
 		}
 
 	default:
-		return w.failTask(ctx, task.TaskID, fmt.Errorf("unsupported file type %q", task.FileType), logger)
+		w.cleanupFileOnFailure(task, logger)
+		return w.failTask(taskCtx, task.TaskID, fmt.Errorf("unsupported file type %q", task.FileType), logger)
 	}
-
-	if err := w.tasks.UpdateStatus(ctx, task.TaskID, domain.TaskDone, ""); err != nil {
+	if err := w.tasks.UpdateStatus(taskCtx, task.TaskID, domain.TaskDone, ""); err != nil {
+		// Task succeeded but finalization failed - do NOT delete file so retry is possible
+		logger.Error("task completed but status update failed - file retained for retry", "task_id", task.TaskID, "err", err)
 		return fmt.Errorf("update task status done: %w", err)
 	}
+
+	// Only delete file after successful finalization
+	w.cleanupFileOnSuccess(task, logger)
 	logger.Info("upload task completed", "task_id", task.TaskID)
 	return nil
+
 }
 
 func (w *UploadWorker) failTask(ctx context.Context, taskID string, err error, logger *slog.Logger) error {
@@ -266,7 +319,8 @@ func (w *UploadWorker) failTask(ctx context.Context, taskID string, err error, l
 	return err
 }
 
-func (w *UploadWorker) cleanupFile(task domain.UploadTask, logger *slog.Logger) {
+// cleanupFileOnSuccess removes the file after task completes successfully.
+func (w *UploadWorker) cleanupFileOnSuccess(task domain.UploadTask, logger *slog.Logger) {
 	if task.FilePath == "" {
 		return
 	}
@@ -274,7 +328,20 @@ func (w *UploadWorker) cleanupFile(task domain.UploadTask, logger *slog.Logger) 
 		if logger == nil {
 			logger = slog.Default()
 		}
-		logger.Error("failed to remove upload file", "task_id", task.TaskID, "path", task.FilePath, "err", err)
+		logger.Error("failed to remove upload file after success", "task_id", task.TaskID, "path", task.FilePath, "err", err)
+	}
+}
+
+// cleanupFileOnFailure removes the file when task fails permanently.
+func (w *UploadWorker) cleanupFileOnFailure(task domain.UploadTask, logger *slog.Logger) {
+	if task.FilePath == "" {
+		return
+	}
+	if err := os.Remove(task.FilePath); err != nil && !os.IsNotExist(err) {
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error("failed to remove upload file after failure", "task_id", task.TaskID, "path", task.FilePath, "err", err)
 	}
 }
 

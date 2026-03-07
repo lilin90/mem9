@@ -3,6 +3,7 @@ package handler
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/qiffang/mnemos/server/internal/domain"
 )
+
+// Maximum file size for uploads (50MB)
+const maxUploadSize = 50 << 20
+
+// Maximum agent_id length (matches VARCHAR(100) in schema)
+const maxAgentIDLength = 100
 
 // --- Response types ---
 
@@ -63,6 +70,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		s.handleError(w, &domain.ValidationError{Field: "agent_id", Message: "invalid characters in agent_id"})
 		return
 	}
+	// Validate length against schema constraint VARCHAR(100)
+	if len(agentID) > maxAgentIDLength {
+		s.handleError(w, &domain.ValidationError{Field: "agent_id", Message: fmt.Sprintf("agent_id exceeds %d characters", maxAgentIDLength)})
+		return
+	}
 	sessionID := r.FormValue("session_id")
 	fileType := r.FormValue("file_type")
 	if fileType != string(domain.FileTypeSession) && fileType != string(domain.FileTypeMemory) {
@@ -81,27 +93,53 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fileName := filepath.Base(header.Filename)
-	filePath := filepath.Join(dir, fileName)
 
-	// If file already exists on disk, append a random suffix.
-	if _, err := os.Stat(filePath); err == nil {
-		ext := filepath.Ext(fileName)
-		base := strings.TrimSuffix(fileName, ext)
-		fileName = fmt.Sprintf("%s_%s%s", base, randomSuffix(6), ext)
-		filePath = filepath.Join(dir, fileName)
+	// Use O_EXCL to atomically create file and detect collisions.
+	// If collision, append random suffix and retry.
+	var filePath string
+	var dst *os.File
+	for attempt := 0; attempt < 5; attempt++ {
+		candidate := fileName
+		if attempt > 0 {
+			ext := filepath.Ext(fileName)
+			base := strings.TrimSuffix(fileName, ext)
+			candidate = fmt.Sprintf("%s_%s%s", base, randomSuffix(6), ext)
+		}
+		filePath = filepath.Join(dir, candidate)
+		f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			dst = f
+			fileName = candidate
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			s.handleError(w, err)
+			return
+		}
+		// File exists, retry with new suffix
 	}
-
-	dst, err := os.Create(filePath)
-	if err != nil {
-		s.handleError(w, err)
+	if dst == nil {
+		s.handleError(w, &domain.ValidationError{Field: "file", Message: "failed to create unique filename after retries"})
 		return
 	}
-	if _, err := io.Copy(dst, file); err != nil {
+
+	// Enforce file size limit during copy
+	limitedReader := io.LimitReader(file, maxUploadSize+1)
+	written, err := io.Copy(dst, limitedReader)
+	if err != nil {
 		dst.Close()
 		if removeErr := os.Remove(filePath); removeErr != nil {
 			s.logger.Error("failed to remove file after copy failure", "path", filePath, "err", removeErr)
 		}
 		s.handleError(w, err)
+		return
+	}
+	if written > maxUploadSize {
+		dst.Close()
+		if removeErr := os.Remove(filePath); removeErr != nil {
+			s.logger.Error("failed to remove oversized file", "path", filePath, "err", removeErr)
+		}
+		s.handleError(w, &domain.ValidationError{Field: "file", Message: fmt.Sprintf("file exceeds maximum size of %d bytes", maxUploadSize)})
 		return
 	}
 	if err := dst.Close(); err != nil {
