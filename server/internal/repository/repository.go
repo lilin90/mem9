@@ -31,6 +31,9 @@ type MemoryRepo interface {
 	// FTSSearch performs full-text search using FTS_MATCH_WORD with BM25 ranking.
 	// Results include a fts_score field used for RRF merge.
 	FTSSearch(ctx context.Context, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error)
+	// FTSAvailable reports whether full-text search is usable on this database.
+	FTSAvailable() bool
+
 
 	ListBootstrap(ctx context.Context, limit int) ([]domain.Memory, error)
 }

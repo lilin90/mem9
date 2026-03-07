@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -17,43 +18,59 @@ import (
 type MemoryRepo struct {
 	db           *sql.DB
 	autoModel    string
-	ftsAvailable bool
+	ftsAvailable atomic.Bool
 }
 
 func NewMemoryRepo(db *sql.DB, autoModel string) *MemoryRepo {
 	r := &MemoryRepo{db: db, autoModel: autoModel}
-	ensureFTSIndex(db)
-	r.ftsAvailable = probeFTS(db)
+	// Run FTS index creation + probe in the background so the first HTTP
+	// request for this tenant is not blocked by DDL or retry loops.
+	go func() {
+		ensureFTSIndex(db)
+		if err := probeFTS(db); err != nil {
+			slog.Error("FTS probe failed — full-text search will be unavailable", "err", err)
+			return
+		}
+		slog.Info("FTS probe succeeded — full-text search is available")
+		r.ftsAvailable.Store(true)
+	}()
 	return r
 }
 
 // ensureFTSIndex attempts to create the FTS index if it does not yet exist.
-// Errors are ignored — the index may already exist or the cluster may not support it.
+// Duplicate index errors are expected and ignored.
 func ensureFTSIndex(db *sql.DB) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, _ = db.ExecContext(ctx,
+	_, err := db.ExecContext(ctx,
 		`ALTER TABLE memories ADD FULLTEXT INDEX idx_fts_content (content) WITH PARSER MULTILINGUAL ADD_COLUMNAR_REPLICA_ON_DEMAND`,
 	)
+	if err != nil {
+		// Duplicate index is expected; log others at warn level.
+		if !strings.Contains(err.Error(), "Duplicate") && !strings.Contains(err.Error(), "1061") {
+			slog.Warn("ensureFTSIndex: non-duplicate error", "err", err)
+		}
+	} else {
+		slog.Info("ensureFTSIndex: FTS index created successfully")
+	}
 }
 
-func probeFTS(db *sql.DB) bool {
+func probeFTS(db *sql.DB) error {
 	const maxAttempts = 5
 	const retryDelay = 5 * time.Second
 
+	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, err := db.ExecContext(ctx, `SELECT fts_match_word('probe', content) FROM memories LIMIT 0`)
 		cancel()
 		if err == nil {
-			return true
+			return nil
 		}
+		lastErr = err
 		msg := err.Error()
 		isProvisioning := strings.Contains(strings.ToLower(msg), "columnar") ||
 			strings.Contains(strings.ToLower(msg), "tiflash")
-		isUnsupported := strings.Contains(msg, "1305") ||
-			strings.Contains(strings.ToLower(msg), "function") ||
-			strings.Contains(strings.ToLower(msg), "unknown")
 		if isProvisioning {
 			slog.Warn("FTS index provisioning in progress; will retry",
 				"attempt", attempt, "max", maxAttempts, "err", err)
@@ -61,20 +78,15 @@ func probeFTS(db *sql.DB) bool {
 				time.Sleep(retryDelay)
 				continue
 			}
-			slog.Warn("FTS not available after retries; keyword searches will fall back to LIKE")
-			return false
+			return fmt.Errorf("FTS not available after %d retries: %w", maxAttempts, lastErr)
 		}
-		if isUnsupported {
-			slog.Warn("FTS not supported on this cluster; keyword searches will fall back to LIKE", "err", err)
-			return false
-		}
-		slog.Warn("FTS probe failed; keyword searches will fall back to LIKE", "err", err)
-		return false
+		// Not a provisioning issue — fail immediately.
+		return fmt.Errorf("FTS probe failed: %w", err)
 	}
-	return false
+	return fmt.Errorf("FTS probe exhausted retries: %w", lastErr)
 }
 
-func (r *MemoryRepo) FTSAvailable() bool { return r.ftsAvailable }
+func (r *MemoryRepo) FTSAvailable() bool { return r.ftsAvailable.Load() }
 
 const allColumns = `id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, state, version, updated_by, created_at, updated_at, superseded_by`
 

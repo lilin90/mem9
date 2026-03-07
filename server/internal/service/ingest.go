@@ -80,6 +80,7 @@ func NewIngestService(
 
 // Ingest runs the pipeline: extract facts from conversation, reconcile with existing memories.
 func (s *IngestService) Ingest(ctx context.Context, agentName string, req IngestRequest) (*IngestResult, error) {
+	slog.Info("ingest pipeline started", "agent", agentName, "agent_id", req.AgentID, "session_id", req.SessionID, "messages", len(req.Messages), "mode", req.Mode)
 	if len(req.Messages) == 0 {
 		return nil, &domain.ValidationError{Field: "messages", Message: "required"}
 	}
@@ -117,8 +118,13 @@ func (s *IngestService) Ingest(ctx context.Context, agentName string, req Ingest
 		return &IngestResult{Status: "failed", Warnings: warnings}, nil
 	}
 
+	status := "complete"
+	if warnings > 0 && len(insightIDs) == 0 {
+		status = "partial" // Facts extracted but reconciliation failed — no memories written
+	}
+
 	return &IngestResult{
-		Status:          "complete",
+		Status:          status,
 		MemoriesChanged: len(insightIDs),
 		InsightIDs:      insightIDs,
 		Warnings:        warnings,
@@ -137,7 +143,7 @@ func (s *IngestService) ingestRaw(ctx context.Context, agentName string, req Ing
 		var err error
 		embedding, err = s.embedder.Embed(ctx, content)
 		if err != nil {
-			slog.Warn("embedding failed for raw ingest", "err", err)
+			return nil, fmt.Errorf("embed for raw ingest: %w", err)
 		}
 	}
 
@@ -194,7 +200,7 @@ func (s *IngestService) extractAndReconcile(ctx context.Context, agentName, agen
 func (s *IngestService) extractFacts(ctx context.Context, conversation string) ([]string, error) {
 	currentDate := time.Now().Format("2006-01-02")
 
-	systemPrompt := `You are an information extraction engine. Your task is to identify distinct, 
+	systemPrompt := `You are an information extraction engine. Your task is to identify distinct,
 atomic facts from a conversation and return them as a structured JSON array.
 
 ## Rules
@@ -208,6 +214,38 @@ atomic facts from a conversation and return them as a structured JSON array.
 5. Omit ephemeral information (greetings, filler, debugging chatter with no lasting value).
 6. Omit information that is only relevant to the current task and has no future reuse value.
 7. If no meaningful facts exist in the conversation, return an empty array.
+
+## Examples
+
+Input:
+User: Hi, how are you?
+Assistant: I'm doing well, thank you! How can I help?
+Output: {"facts": []}
+
+Input:
+User: The weather is nice today.
+Assistant: Indeed it is! Enjoy your day.
+Output: {"facts": []}
+
+Input:
+User: I'm looking for a restaurant in San Francisco.
+Assistant: Sure, what cuisine do you prefer?
+Output: {"facts": ["Looking for a restaurant in San Francisco"]}
+
+Input:
+User: Yesterday I had a meeting with John at 3pm. We discussed the new project timeline.
+Assistant: Sounds productive!
+Output: {"facts": ["Had a meeting with John at 3pm", "Discussed the new project timeline with John"]}
+
+Input:
+User: My name is Ming Zhang, I am a backend engineer, mainly using Go and Python.
+Assistant: Hi Ming Zhang!
+Output: {"facts": ["Name is Ming Zhang", "Is a backend engineer", "Mainly uses Go and Python"]}
+
+Input:
+User: My favorite movies are Inception and Interstellar. I also love Italian food, especially pizza.
+Assistant: Great taste! Both are amazing films.
+Output: {"facts": ["Favorite movies are Inception and Interstellar", "Loves Italian food, especially pizza"]}
 
 ## Output Format
 
@@ -247,6 +285,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.
 			facts = append(facts, f)
 		}
 	}
+	slog.Info("facts extracted", "count", len(facts))
 	return facts, nil
 }
 
@@ -256,7 +295,11 @@ Return ONLY valid JSON. No markdown fences, no explanation.
 // the existing knowledge base, enabling better ADD/UPDATE/DELETE/NOOP decisions.
 func (s *IngestService) reconcile(ctx context.Context, agentName, agentID, sessionID string, facts []string) ([]string, int, error) {
 	// Step 1: For each fact, search for relevant existing memories and collect them.
-	existingMemories := s.gatherExistingMemories(ctx, agentID, facts)
+	existingMemories, gatherErr := s.gatherExistingMemories(ctx, agentID, facts)
+	if gatherErr != nil {
+		return nil, 0, fmt.Errorf("gather existing memories: %w", gatherErr)
+	}
+	slog.Info("gathered existing memories for reconciliation", "facts", len(facts), "existing", len(existingMemories))
 
 	if len(existingMemories) == 0 {
 		return s.addAllFacts(ctx, agentName, agentID, sessionID, facts)
@@ -297,6 +340,28 @@ func (s *IngestService) reconcile(ctx context.Context, agentName, agentID, sessi
 6. When the fact means the same thing as an existing memory (even if worded differently), use NOOP.
 7. Preserve the language of the original facts. Do not translate.
 
+## Examples
+
+Example 1 — ADD new information:
+  Existing memories: [{"id": 0, "text": "Is a software engineer"}]
+  New facts: ["Name is John"]
+  Result: {"memory": [{"id": "0", "text": "Is a software engineer", "event": "NOOP"}, {"id": "new", "text": "Name is John", "event": "ADD"}]}
+
+Example 2 — UPDATE with more detail:
+  Existing memories: [{"id": 0, "text": "Likes to play cricket"}, {"id": 1, "text": "Is a software engineer"}]
+  New facts: ["Loves to play cricket with friends on weekends"]
+  Result: {"memory": [{"id": "0", "text": "Loves to play cricket with friends on weekends", "event": "UPDATE", "old_memory": "Likes to play cricket"}, {"id": "1", "text": "Is a software engineer", "event": "NOOP"}]}
+
+Example 3 — DELETE contradicted information:
+  Existing memories: [{"id": 0, "text": "Name is John"}, {"id": 1, "text": "Loves cheese pizza"}]
+  New facts: ["Dislikes cheese pizza"]
+  Result: {"memory": [{"id": "0", "text": "Name is John", "event": "NOOP"}, {"id": "1", "text": "Loves cheese pizza", "event": "DELETE"}, {"id": "new", "text": "Dislikes cheese pizza", "event": "ADD"}]}
+
+Example 4 — NOOP for equivalent information:
+  Existing memories: [{"id": 0, "text": "Name is John"}, {"id": 1, "text": "Loves cheese pizza"}]
+  New facts: ["Name is John"]
+  Result: {"memory": [{"id": "0", "text": "Name is John", "event": "NOOP"}, {"id": "1", "text": "Loves cheese pizza", "event": "NOOP"}]}
+
 ## Output Format
 
 Return ONLY valid JSON. No markdown fences.
@@ -322,8 +387,8 @@ Analyze the new facts and determine whether each should be added, updated, or de
 
 	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
 	if err != nil {
-		slog.Warn("reconciliation LLM call failed, falling back to ADD-all", "err", err)
-		return s.addAllFacts(ctx, agentName, agentID, sessionID, facts)
+		slog.Warn("reconciliation LLM call failed, skipping to avoid duplicates", "err", err)
+		return nil, 1, nil // warnings=1 signals that facts were extracted but reconciliation was skipped
 	}
 
 	type reconcileEvent struct {
@@ -342,13 +407,13 @@ Analyze the new facts and determine whether each should be added, updated, or de
 		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt,
 			"Your previous response was not valid JSON. Return ONLY the JSON object.\n\n"+userPrompt)
 		if retryErr != nil {
-			slog.Warn("reconciliation retry failed, falling back to ADD-all", "err", retryErr)
-			return s.addAllFacts(ctx, agentName, agentID, sessionID, facts)
+			slog.Warn("reconciliation retry failed, skipping to avoid duplicates", "err", retryErr)
+			return nil, 1, nil // warnings=1 signals that facts were extracted but reconciliation was skipped
 		}
 		parsed, err = llm.ParseJSON[reconcileResponse](raw2)
 		if err != nil {
-			slog.Warn("reconciliation JSON parse failed after retry, falling back to ADD-all", "err", err)
-			return s.addAllFacts(ctx, agentName, agentID, sessionID, facts)
+			slog.Warn("reconciliation JSON parse failed after retry, skipping to avoid duplicates", "err", err)
+			return nil, 1, nil // warnings=1 signals that facts were extracted but reconciliation was skipped
 		}
 	}
 
@@ -429,17 +494,14 @@ Analyze the new facts and determine whether each should be added, updated, or de
 }
 
 // gatherExistingMemories searches relevant memories for each fact, deduplicates
-// by ID, and returns a single flat list. All memories (pinned + insight) belong
-// to the same agent, so a single query with agent_id scoping is sufficient.
-//
-// Graceful degradation contract: on any search/list failure, the error is logged
-// and that source is skipped. A nil return means all sources failed or the store
-// is empty — the caller (reconcile) will fall through to addAllFacts, which may
-// create duplicates but never loses data.
-func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID string, facts []string) []domain.Memory {
+// by ID, and returns a single flat list. Returns an error if any search backend
+// fails — on TiDB Serverless, search features are always available so failures
+// indicate a real problem that should be surfaced.
+func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID string, facts []string) ([]domain.Memory, error) {
 	const perFactLimit = 5
 	const contentMaxLen = 150
-	const maxExistingMemories = 60 // Cap total results to prevent LLM token overflow
+	const maxExistingMemories = 60
+	const minSimilarityScore = 0.3 // Skip vector results with score below this threshold
 
 	filter := domain.MemoryFilter{
 		State:      "active",
@@ -447,48 +509,16 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 		AgentID:    agentID,
 	}
 
-	if s.embedder == nil && s.autoModel == "" {
-		// No vector search — fall back to listing recent memories.
-		filter.Limit = perFactLimit * len(facts)
-		if filter.Limit > maxExistingMemories {
-			filter.Limit = maxExistingMemories
-		}
-		mems, _, err := s.memories.List(ctx, filter)
-		if err != nil {
-			slog.Warn("list memories for reconcile failed", "err", err)
-			return nil
-		}
-		for i := range mems {
-			mems[i].Content = truncateRunes(mems[i].Content, contentMaxLen)
-		}
-		return mems
-	}
-
-	// Vector search: for each fact, search top-K and deduplicate across all results.
 	seen := make(map[string]struct{})
 	var result []domain.Memory
 
-	for _, fact := range facts {
-		var matches []domain.Memory
-		var err error
-
-		if s.autoModel != "" {
-			matches, err = s.memories.AutoVectorSearch(ctx, fact, filter, perFactLimit)
-		} else {
-			vec, embedErr := s.embedder.Embed(ctx, fact)
-			if embedErr != nil {
-				slog.Warn("embedding failed for fact during reconcile", "err", embedErr)
-				continue
-			}
-			matches, err = s.memories.VectorSearch(ctx, vec, filter, perFactLimit)
-		}
-		if err != nil {
-			slog.Warn("vector search failed during reconcile", "err", err)
-			continue
-		}
-
+	addUnseen := func(matches []domain.Memory, applyThreshold bool) {
 		for _, m := range matches {
 			if _, ok := seen[m.ID]; ok {
+				continue
+			}
+			// Skip low-similarity vector results to avoid polluting LLM context.
+			if applyThreshold && m.Score != nil && *m.Score < minSimilarityScore {
 				continue
 			}
 			seen[m.ID] = struct{}{}
@@ -497,15 +527,77 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 		}
 	}
 
+	// No vector search available.
+	if s.embedder == nil && s.autoModel == "" {
+		// Use FTS if available, otherwise fall back to keyword (LIKE) search.
+		// During cold start, FTS may not yet be available (probe still running).
+		for _, fact := range facts {
+			var kwMatches []domain.Memory
+			var kwErr error
+			if s.memories.FTSAvailable() {
+				kwMatches, kwErr = s.memories.FTSSearch(ctx, fact, filter, perFactLimit)
+			} else {
+				kwMatches, kwErr = s.memories.KeywordSearch(ctx, fact, filter, perFactLimit)
+			}
+			if kwErr != nil {
+				slog.Warn("gatherExistingMemories: keyword/FTS search failed for fact, skipping", "fact", truncateRunes(fact, 50), "err", kwErr)
+				continue
+			}
+			addUnseen(kwMatches, false)
+		}
+		if len(result) > maxExistingMemories {
+			result = result[:maxExistingMemories]
+		}
+		return result, nil
+	}
+
+	for _, fact := range facts {
+		// Leg 1: Vector search.
+		var vecMatches []domain.Memory
+		if s.autoModel != "" {
+			var vecErr error
+			vecMatches, vecErr = s.memories.AutoVectorSearch(ctx, fact, filter, perFactLimit)
+			if vecErr != nil {
+				slog.Warn("gatherExistingMemories: auto vector search failed for fact, continuing with keyword leg", "fact", truncateRunes(fact, 50), "err", vecErr)
+			}
+		} else {
+			vec, embedErr := s.embedder.Embed(ctx, fact)
+			if embedErr != nil {
+				slog.Warn("gatherExistingMemories: embed failed for fact, continuing with keyword leg", "fact", truncateRunes(fact, 50), "err", embedErr)
+			} else {
+				var vecErr error
+				vecMatches, vecErr = s.memories.VectorSearch(ctx, vec, filter, perFactLimit)
+				if vecErr != nil {
+					slog.Warn("gatherExistingMemories: vector search failed for fact, continuing with keyword leg", "fact", truncateRunes(fact, 50), "err", vecErr)
+				}
+			}
+		}
+		addUnseen(vecMatches, true) // Apply similarity threshold to vector results
+
+		// Leg 2: FTS / keyword search — catches exact terms that vector search may miss.
+		var kwMatches []domain.Memory
+		var kwErr error
+		if s.memories.FTSAvailable() {
+			kwMatches, kwErr = s.memories.FTSSearch(ctx, fact, filter, perFactLimit)
+		} else {
+			kwMatches, kwErr = s.memories.KeywordSearch(ctx, fact, filter, perFactLimit)
+		}
+		if kwErr != nil {
+			slog.Warn("gatherExistingMemories: keyword/FTS search failed for fact, skipping", "fact", truncateRunes(fact, 50), "err", kwErr)
+		} else {
+			addUnseen(kwMatches, false) // No threshold for keyword/FTS results
+		}
+	}
+
 	if len(result) > maxExistingMemories {
-		slog.Warn("gatherExistingMemories: truncating vector results", "count", len(result), "max", maxExistingMemories)
+		slog.Info("gatherExistingMemories: truncating results", "count", len(result), "max", maxExistingMemories)
 		result = result[:maxExistingMemories]
 	}
-	return result
+	return result, nil
 }
 
-// addAllFacts adds all facts as new insights (fallback when reconciliation is
-// not possible, e.g., no existing memories or LLM failure).
+// addAllFacts adds all facts as new insights when no existing memories are
+// found (i.e., all facts are guaranteed new). Called only when gatherExistingMemories returns empty.
 func (s *IngestService) addAllFacts(ctx context.Context, agentName, agentID, sessionID string, facts []string) ([]string, int, error) {
 	var ids []string
 	var warnings int
@@ -528,7 +620,7 @@ func (s *IngestService) addInsight(ctx context.Context, agentName, agentID, sess
 		var err error
 		embedding, err = s.embedder.Embed(ctx, content)
 		if err != nil {
-			slog.Warn("embedding failed for insight", "err", err)
+			return "", fmt.Errorf("embed insight: %w", err)
 		}
 	}
 
@@ -564,7 +656,7 @@ func (s *IngestService) updateInsight(ctx context.Context, agentName, agentID, s
 		var err error
 		embedding, err = s.embedder.Embed(ctx, newContent)
 		if err != nil {
-			slog.Warn("embedding failed for updated insight", "err", err)
+			return "", fmt.Errorf("embed updated insight: %w", err)
 		}
 	}
 
