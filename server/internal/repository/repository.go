@@ -61,6 +61,7 @@ type UploadTaskRepo interface {
 	ListByTenant(ctx context.Context, tenantID string) ([]domain.UploadTask, error)
 	UpdateStatus(ctx context.Context, taskID string, status domain.TaskStatus, errorMsg string) error
 	UpdateProgress(ctx context.Context, taskID string, doneChunks int) error
+	UpdateTotalChunks(ctx context.Context, taskID string, totalChunks int) error
 	FetchPending(ctx context.Context, limit int) ([]domain.UploadTask, error)
 	ResetProcessing(ctx context.Context) (int64, error)
 }

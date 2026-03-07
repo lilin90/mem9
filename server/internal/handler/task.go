@@ -58,6 +58,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		s.handleError(w, &domain.ValidationError{Field: "agent_id", Message: "agent_id is required"})
 		return
 	}
+	// Reject path traversal characters to prevent arbitrary file write/delete.
+	if strings.ContainsAny(agentID, "/\\") || strings.Contains(agentID, "..") {
+		s.handleError(w, &domain.ValidationError{Field: "agent_id", Message: "invalid characters in agent_id"})
+		return
+	}
 	sessionID := r.FormValue("session_id")
 	fileType := r.FormValue("file_type")
 	if fileType != string(domain.FileTypeSession) && fileType != string(domain.FileTypeMemory) {
@@ -93,12 +98,16 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := io.Copy(dst, file); err != nil {
 		dst.Close()
-		_ = os.Remove(filePath)
+		if removeErr := os.Remove(filePath); removeErr != nil {
+			s.logger.Error("failed to remove file after copy failure", "path", filePath, "err", removeErr)
+		}
 		s.handleError(w, err)
 		return
 	}
 	if err := dst.Close(); err != nil {
-		_ = os.Remove(filePath)
+		if removeErr := os.Remove(filePath); removeErr != nil {
+			s.logger.Error("failed to remove file after close failure", "path", filePath, "err", removeErr)
+		}
 		s.handleError(w, err)
 		return
 	}
@@ -114,7 +123,9 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		Status:   domain.TaskPending,
 	}
 	if err := s.uploadTasks.Create(r.Context(), task); err != nil {
-		_ = os.Remove(filePath)
+		if removeErr := os.Remove(filePath); removeErr != nil {
+			s.logger.Error("leaked upload file after task create failure", "path", filePath, "err", removeErr)
+		}
 		s.handleError(w, err)
 		return
 	}
@@ -151,11 +162,14 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	status := "done"
-	if failed > 0 {
-		status = "partial"
-	} else if done < len(tasks) {
-		status = "processing"
+	status := "empty"
+	if len(tasks) > 0 {
+		status = "done"
+		if failed > 0 {
+			status = "partial"
+		} else if done < len(tasks) {
+			status = "processing"
+		}
 	}
 
 	respond(w, http.StatusOK, taskListResponse{Status: status, Tasks: details})

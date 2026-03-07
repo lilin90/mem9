@@ -125,5 +125,5 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
   created_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
   updated_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_upload_tenant (tenant_id),
-  INDEX idx_upload_status (status)
+  INDEX idx_upload_poll (status, created_at)
 );

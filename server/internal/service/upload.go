@@ -117,7 +117,9 @@ func (w *UploadWorker) Run(ctx context.Context) error {
 			}
 			logger.Info("processing upload tasks", "count", len(tasks))
 			for _, task := range tasks {
-				_ = w.processTask(ctx, task)
+				if err := w.processTask(ctx, task); err != nil {
+					logger.Error("task processing error", "task_id", task.TaskID, "err", err)
+				}
 			}
 		}
 	}
@@ -168,6 +170,10 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 		}
 
 		chunks := chunkMessages(file.Messages, uploadChunkSize)
+		// Set total_chunks after parsing so progress reporting works correctly.
+		if err := w.tasks.UpdateTotalChunks(ctx, task.TaskID, len(chunks)); err != nil {
+			return w.failTask(ctx, task.TaskID, fmt.Errorf("update total chunks: %w", err), logger)
+		}
 		for _, chunk := range chunks {
 			_, err := ingestSvc.Ingest(ctx, agentName, IngestRequest{
 				AgentID:   file.AgentID,
@@ -191,6 +197,14 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 		}
 		if file.AgentID == "" {
 			file.AgentID = task.AgentID
+		}
+		// Set total_chunks after parsing so progress reporting works correctly.
+		totalBatches := (len(file.Memories) + uploadMemoryBatchSize - 1) / uploadMemoryBatchSize
+		if totalBatches == 0 {
+			totalBatches = 1 // At least 1 for empty file
+		}
+		if err := w.tasks.UpdateTotalChunks(ctx, task.TaskID, totalBatches); err != nil {
+			return w.failTask(ctx, task.TaskID, fmt.Errorf("update total chunks: %w", err), logger)
 		}
 		for i := 0; i < len(file.Memories); i += uploadMemoryBatchSize {
 			end := i + uploadMemoryBatchSize

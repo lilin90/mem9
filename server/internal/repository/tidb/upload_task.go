@@ -84,6 +84,17 @@ func (r *UploadTaskRepoImpl) UpdateProgress(ctx context.Context, taskID string, 
 	return nil
 }
 
+func (r *UploadTaskRepoImpl) UpdateTotalChunks(ctx context.Context, taskID string, totalChunks int) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE upload_tasks SET total_chunks = ?, updated_at = NOW() WHERE task_id = ?`,
+		totalChunks, taskID,
+	)
+	if err != nil {
+		return fmt.Errorf("update upload task total chunks: %w", err)
+	}
+	return nil
+}
+
 func (r *UploadTaskRepoImpl) FetchPending(ctx context.Context, limit int) ([]domain.UploadTask, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -92,7 +103,7 @@ func (r *UploadTaskRepoImpl) FetchPending(ctx context.Context, limit int) ([]dom
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx,
-		`SELECT `+uploadTaskColumns+` FROM upload_tasks WHERE status = 'pending' ORDER BY created_at LIMIT ? FOR UPDATE`,
+		`SELECT `+uploadTaskColumns+` FROM upload_tasks WHERE status = 'pending' ORDER BY created_at LIMIT ? FOR UPDATE SKIP LOCKED`,
 		limit,
 	)
 	if err != nil {
