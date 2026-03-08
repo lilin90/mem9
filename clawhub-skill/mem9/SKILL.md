@@ -50,7 +50,13 @@ Your agent forgets nothing. Stateless plugin → REST API → DB.
 
 Persistent memory for AI agents.
 
-No authentication. Tenant ID in URL path is the only identifier.
+The plugin connects to one cloud memory space, identified by a space ID.
+
+When talking to end users:
+- Say "space ID", "memory space", or "cloud memory space"
+- Do not mention `tenantID` unless you are editing raw plugin config
+- Explain that the space ID tells mem9 which cloud memory space to connect to
+- Treat the space ID as something the user should save for reconnecting later
 
 ---
 
@@ -76,6 +82,24 @@ Lifecycle hooks (automatic — no agent action needed):
 
 ## Onboarding
 
+## Terminology
+
+Use this distinction consistently:
+
+| Internal term | User-facing explanation |
+|---------------|-------------------------|
+| `tenantID` | Internal plugin config field; do not surface this to users unless editing config |
+| `SPACE_ID` env var | A local variable holding the user's mem9 space ID |
+| "recovery key" | Avoid this term; say "space ID" instead |
+
+If the user asks "What is this for?" answer plainly:
+
+> This ID tells mem9 which cloud memory space to use. OpenClaw stores and reads memories under this ID.
+
+If the user asks "What is the relationship between tenantID and key?" answer plainly:
+
+> You only need the space ID. That is the value you save and reuse later to reconnect to the same cloud memory. `tenantID` is just the internal plugin config field name for that value.
+
 ### Step 1 — Provision tenant
 
 `[AGENT]`
@@ -91,7 +115,11 @@ Response:
 }
 ```
 
-Save `id` as `TENANT_ID`.
+Save `id` as `SPACE_ID`.
+
+When explaining it to the user, say:
+
+> mem9 created a new cloud memory space for you. This ID is how this machine, or a future machine, reconnects to the same memory.
 
 ### Step 2 — Install plugin
 
@@ -108,11 +136,11 @@ openclaw plugins install @mem9/mem9
 `[AGENT]` Patch existing config (merge-safe, preserves other keys):
 
 ```bash
-jq --arg tid "$TENANT_ID" '
+jq --arg sid "$SPACE_ID" '
   .plugins.slots.memory = "mem9" |
   .plugins.entries.mem9 = {
     enabled: true,
-    config: { apiUrl: "https://api.mem9.ai", tenantID: $tid }
+    config: { apiUrl: "https://api.mem9.ai", tenantID: $sid }
   } |
   .plugins.allow = ((.plugins.allow // []) + ["mem9"] | unique)
 ' openclaw.json > tmp.json && mv tmp.json openclaw.json
@@ -131,7 +159,7 @@ Or if no `openclaw.json` exists, create:
         "enabled": true,
         "config": {
           "apiUrl": "https://api.mem9.ai",
-          "tenantID": "<your-tenant-id>"
+          "tenantID": "<your-space-id>"
         }
       }
     },
@@ -145,11 +173,11 @@ Or if no `openclaw.json` exists, create:
 `[AGENT]` No `allow` array needed:
 
 ```bash
-jq --arg tid "$TENANT_ID" '
+jq --arg sid "$SPACE_ID" '
   .plugins.slots.memory = "mem9" |
   .plugins.entries.mem9 = {
     enabled: true,
-    config: { apiUrl: "https://api.mem9.ai", tenantID: $tid }
+    config: { apiUrl: "https://api.mem9.ai", tenantID: $sid }
   }
 ' openclaw.json > tmp.json && mv tmp.json openclaw.json
 ```
@@ -163,19 +191,44 @@ If result returns stored memory → setup successful.
 ```
 ✅ mem9 installed!
 
-📤 UPLOAD HISTORY (optional)
-   Upload your local memory files for complete cloud backup:
-   
-   Say "import memories to mem9" and I'll scan and upload automatically.
+🧭 NEXT RECOMMENDED STEP
+   Import your existing local memories first, so your cloud memory starts with your real history.
+
+   Say: "import memories to mem9"
+   I will scan and upload supported local files automatically.
    Supported: memory.json, memories/*.json, sessions/*.json
 
-💾 YOUR RECOVERY KEY (save this!)
-   
-   TENANT_ID: <your-tenant-id>
-   
-   Lost your OpenClaw? New machine? Just configure this ID in Step 3.
-   All memories instant restore. Zero re-upload.
+💾 YOUR MEM9 SPACE ID
+
+   SPACE_ID: <your-space-id>
+
+   This is not a display name. It is the ID that points OpenClaw to your cloud memory space.
+   Save it somewhere safe so you can reconnect to the same cloud memory later.
+
+♻️ RECOVERY
+
+   New machine / re-install:
+   1. Install mem9 plugin again
+   2. Put this same ID back into Step 3 config
+   3. Your cloud memories reconnect immediately
+
+📦 BACKUP PLAN
+
+   Local backup:
+   Keep your original local memory/session files before import.
+
+   Offsite recovery:
+   Save the ID in your password manager,
+   team vault, or another secure offsite location.
 ```
+
+Do not default to offering a synthetic write/read demo as the next step.
+
+Preferred next-step order:
+1. Guide the user to import historical memories
+2. Explain the recovery path for a new machine or accidental local loss
+3. Explain local backup plus offsite backup
+4. Only offer a live write/read verification if the user explicitly asks for a test or if import/recovery is already clear
 
 ---
 
@@ -203,8 +256,8 @@ Header: `X-Mnemo-Agent-Id: <name>` (optional)
 ## Examples
 
 ```bash
-export TENANT_ID="your-tenant-id"
-export API="https://api.mem9.ai/v1alpha1/mem9s/$TENANT_ID"
+export SPACE_ID="your-space-id"
+export API="https://api.mem9.ai/v1alpha1/mem9s/$SPACE_ID"
 ```
 
 **Store:**
@@ -240,6 +293,32 @@ curl -s "$API/imports"
 
 ---
 
+## Communication Style
+
+When presenting onboarding or recovery instructions:
+- Use plain product language, not backend vocabulary
+- Prefer "space ID" or "memory space ID"
+- Do not introduce extra credential terminology if the user only needs the memory space meaning
+- If the user sounds worried about recovery, lead with backup/import/reconnect steps instead of API demos
+
+Suggested English wording:
+
+```text
+This SPACE_ID is not a nickname.
+It is the unique ID for your mem9 cloud memory space. Once OpenClaw is configured with it, it knows which cloud memory space to read from and write to.
+Save this ID somewhere safe because you will use the same value later if you want to reconnect to this cloud memory on another machine.
+
+The recommended next step is to upload your existing historical memories rather than run a demo test first.
+I can scan local files such as memory.json, memories/*.json, and sessions/*.json and import them into mem9.
+
+Recovery plan:
+1. Local backup: keep the original memory/session files even after import
+2. Offsite recovery: save the SPACE_ID in a password manager, team vault, or another secure offsite location
+3. New machine recovery: reinstall the plugin and configure the same SPACE_ID in openclaw.json to reconnect to the same cloud memory
+```
+
+---
+
 ## Default Import Behavior
 
 When user says "import memories to mem9" without specifying files:
@@ -263,17 +342,18 @@ When user says "import memories to mem9" without specifying files:
 | Symptom | Fix |
 |---------|-----|
 | Plugin not loading | Check `slots.memory = "mem9"` and `entries.mem9.enabled = true` |
-| `404` on API call | Verify tenantID; run `curl https://api.mem9.ai/healthz` |
+| `404` on API call | Verify the saved space ID was written into the plugin config; run `curl https://api.mem9.ai/healthz` |
 ---
 
 ## Next Steps
 
 After first read, do this immediately:
 
-1. **Print** — Tell the user:
-   > mem9 ready. I can `memory_store`, `memory_search`, `memory_get`, `memory_update`, `memory_delete`. Memories auto-recall on every prompt and auto-capture on session end.
-2. **Test** — Ask the user to tell you something to remember. Store it. Start a new session. Verify recall.
-3. **Explore** — `curl -s "https://api.mem9.ai/v1alpha1/mem9s/$TENANT_ID/memories?limit=10" | jq .`
+1. **Import history first** — Offer to scan and upload existing memory/session files before any demo.
+2. **Explain recovery** — Tell the user that reusing the same `SPACE_ID` reconnects the same cloud memory on a new machine.
+3. **Explain backup** — Recommend keeping original local files and saving the ID in a secure offsite location.
+4. **Explore** — `curl -s "https://api.mem9.ai/v1alpha1/mem9s/$SPACE_ID/memories?limit=10" | jq .`
+5. **Verify only if useful** — Offer a live `memory_store` / `memory_search` test only after import and recovery guidance are clear, or if the user explicitly asks for validation.
 
 ---
 
