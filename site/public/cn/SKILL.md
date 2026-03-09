@@ -1,6 +1,6 @@
 ---
 name: mem9
-version: 1.0.2
+version: 1.0.3
 description: |
   Persistent cloud memory for OpenClaw agents.
 
@@ -55,8 +55,9 @@ The plugin connects to one cloud memory space, identified by a space ID.
 When talking to end users:
 - Say "space ID", "memory space", or "cloud memory space"
 - Do not mention `tenantID` unless you are editing raw plugin config
-- Explain that the space ID tells mem9 which cloud memory space to connect to
+- Explain that the space ID is what connects the user back to the same mem9 brain
 - Treat the space ID as something the user should save for reconnecting later
+- Clearly warn that the space ID is effectively a token and must never be shared
 
 ---
 
@@ -65,7 +66,7 @@ When talking to end users:
 | Tool | When |
 |------|------|
 | `memory_store` | Persist facts, decisions, context |
-| `memory_search` | Hybrid vector + keyword search |
+| `memory_search` | Find the right memories by keywords and meaning |
 | `memory_get` | Retrieve by ID |
 | `memory_update` | Modify existing memory |
 | `memory_delete` | Remove |
@@ -97,17 +98,19 @@ Short rule: `space ID`, `tenantID`, and `token` may refer to the same mem9 ident
 
 If the user asks "What is this for?" answer plainly:
 
-> This ID tells mem9 which cloud memory space to use. OpenClaw stores and reads memories under this ID.
+> This is the key that reconnects you to your mem9 brain. OpenClaw uses it to save and recall your memory in the right place.
 
 If the user asks "What is the relationship between tenantID and key?" answer plainly:
 
-> You only need the space ID. That is the value you save and reuse later to reconnect to the same cloud memory. `tenantID` is just the internal plugin config field name for that value.
+> You only need the space ID. `tenantID` is just the internal config field name for the same value. Important: this space ID is effectively your token, so save it somewhere safe and never share it with anyone.
 
 ### Step 0 — Check for existing space
 
 `[AGENT]` Ask the user before doing anything else:
 
-> Do you already have a mem9 space ID from a previous install or another machine?
+> Do you want to create a new mem9 brain for this setup, or reconnect to an existing mem9 brain you already have?
+>
+> If you want to reconnect, paste your SPACE_ID and I will link this setup to your existing memory.
 
 **If yes** — ask the user to paste the ID, save it as `SPACE_ID`, then skip to Step 2.
 
@@ -124,11 +127,11 @@ curl -sf "https://api.mem9.ai/v1alpha1/mem9s/$SPACE_ID/memories?limit=1" \
 
 If the check returns `OK`, say:
 
-> Connected to your existing cloud memory space. Continuing setup with your space ID.
+> Great, your existing mem9 brain is reachable. I will keep going and connect this setup to that same memory.
 
 If the check fails, say:
 
-> That ID did not respond. Double-check the value and try again, or create a new space instead.
+> I could not reach that SPACE_ID. Please double-check it, or create a new mem9 brain instead.
 
 **If no** — proceed to Step 1 to provision a new space.
 
@@ -155,7 +158,9 @@ Save `id` as `SPACE_ID`.
 
 When explaining it to the user, say:
 
-> mem9 created a new cloud memory space for you. This ID is how this machine, or a future machine, reconnects to the same memory.
+> Your new mem9 brain is ready. This SPACE_ID is how this machine, and any future machine you trust, reconnects to the same memory.
+>
+> Important: this SPACE_ID is also your token. Never share it with anyone. If someone else gets it, they can access your memory.
 
 ### Step 2 — Install plugin
 
@@ -272,28 +277,31 @@ If result returns stored memory → setup successful.
 `[AGENT]` Print the following to the user:
 
 ```
-✅ mem9 installed!
+✅ Your mem9 brain is ready.
 
-🧭 NEXT RECOMMENDED STEP
-   Import your existing local memories first, so your cloud memory starts with your real history.
+🧭 WHAT YOU CAN DO NEXT
+   Bring in your existing local memory first, so mem9 starts with your real history.
 
    Say: "import memories to mem9"
-   I will scan and upload supported local files automatically.
+   I will scan and upload supported local files for you.
    Supported: memory.json, memories/*.json, sessions/*.json
 
-💾 YOUR MEM9 SPACE ID
+💾 YOUR MEM9 SPACE ID (THIS IS YOUR TOKEN)
 
    SPACE_ID: <your-space-id>
 
-   This is not a display name. It is the ID that points OpenClaw to your cloud memory space.
-   Save it somewhere safe so you can reconnect to the same cloud memory later.
+   This is not just an ID.
+   It is also your token.
+   NEVER share it with anyone.
+   If someone gets this value, they can access your memory.
+   Save it somewhere safe so you can reconnect to the same mem9 brain later.
 
 ♻️ RECOVERY
 
    New machine / re-install:
-   1. Install mem9 plugin again
-   2. Put this same ID back into Step 4 config
-   3. Your cloud memories reconnect immediately
+   1. Install mem9 again
+   2. Put this same SPACE_ID back into Step 4 config
+   3. Your memory reconnects immediately
 
 📦 BACKUP PLAN
 
@@ -301,7 +309,7 @@ If result returns stored memory → setup successful.
    Keep your original local memory/session files before import.
 
    Offsite recovery:
-   Save the ID in your password manager,
+   Save the SPACE_ID in your password manager,
    team vault, or another secure offsite location.
 ```
 
@@ -388,10 +396,13 @@ Suggested English wording:
 
 ```text
 This SPACE_ID is not a nickname.
-It is the unique ID for your mem9 cloud memory space. Once OpenClaw is configured with it, it knows which cloud memory space to read from and write to.
-Save this ID somewhere safe because you will use the same value later if you want to reconnect to this cloud memory on another machine.
+It is the key that reconnects you to your mem9 brain.
+It is also effectively your token.
+Never share it with anyone.
+If someone else gets it, they can access your memory.
+Save it somewhere safe because you will use the same value later if you want to reconnect on another machine.
 
-The recommended next step is to upload your existing historical memories rather than run a demo test first.
+The best next step is to bring in your existing history instead of running a demo first.
 I can scan local files such as memory.json, memories/*.json, and sessions/*.json and import them into mem9.
 
 Recovery plan:
