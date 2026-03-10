@@ -11,10 +11,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/qiffang/mnemos/server/internal/domain"
 	"github.com/qiffang/mnemos/server/internal/embed"
 	"github.com/qiffang/mnemos/server/internal/llm"
+	"github.com/qiffang/mnemos/server/internal/metrics"
 	"github.com/qiffang/mnemos/server/internal/middleware"
 	"github.com/qiffang/mnemos/server/internal/repository"
 	"github.com/qiffang/mnemos/server/internal/repository/tidb"
@@ -106,11 +108,14 @@ func (s *Server) Router(tenantMW, rateLimitMW func(http.Handler) http.Handler) h
 	r.Use(chimw.RequestID)
 	r.Use(requestLogger(s.logger))
 	r.Use(rateLimitMW)
+	r.Use(metrics.Middleware)
 
 	// Health check.
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	r.Get("/metrics", promhttp.Handler().ServeHTTP)
 
 	// Provision a new tenant — no auth, no body.
 	r.Post("/v1alpha1/mem9s", s.provisionMem9s)
